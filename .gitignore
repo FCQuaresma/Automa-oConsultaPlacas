@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Dados sigilosos do cliente — nunca versionar
+Placas.xlsx
+~$Placas.xlsx
+
+# Environment (caso venha a existir no futuro)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
