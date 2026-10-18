@@ -1,5 +1,7 @@
 import random
+import re
 import time
+from decimal import ROUND_HALF_UP, Decimal
 
 import requests
 from bs4 import BeautifulSoup
@@ -54,6 +56,35 @@ def _get_com_retry(session, url, tentativas=3):
     raise ConsultaError("nao foi possivel obter resposta")
 
 
+def _valor_numerico(texto):
+    """Converte 'R$ 1.234,56' em 1234.56; valores ilegiveis valem -1."""
+    limpo = re.sub(r"[^\d,]", "", texto).replace(",", ".")
+    try:
+        return float(limpo)
+    except ValueError:
+        return -1.0
+
+
+ACRESCIMO_VALOR_VENAL = Decimal("1.10")
+
+
+def _extrair_valor_venal(soup):
+    """Valor Venal (base do IPVA) da primeira ocorrencia na pagina, ou None."""
+    for td in soup.find_all("td"):
+        if td.get_text(strip=True).rstrip(":") == "Valor Venal":
+            proximo = td.find_next_sibling("td")
+            if proximo:
+                bruto = re.sub(r"[^\d,]", "", proximo.get_text(strip=True))
+                if bruto:
+                    return Decimal(bruto.replace(",", "."))
+    return None
+
+
+def _formatar_moeda(valor):
+    texto = f"{valor:,.2f}"
+    return "R$ " + texto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def _parse_resultado(html):
     soup = BeautifulSoup(html, "html.parser")
 
@@ -71,23 +102,37 @@ def _parse_resultado(html):
     corpo_lower = soup.get_text(" ", strip=True).lower()
     fipe_nao_encontrada = any(m in corpo_lower for m in NAO_ENCONTRADO_MARCADORES)
 
-    fipe_modelo = fipe_valor = None
-    tabela_mobile = soup.select_one("table.fipe-mobile")
-    if tabela_mobile:
-        for tr in tabela_mobile.select("tr"):
+    # Pode haver mais de um valor FIPE (varias versoes do modelo): coleta todos
+    # os pares (modelo, valor) e fica com o de maior valor.
+    candidatos = []
+    for tabela in soup.select("table.fipe-mobile"):
+        fipe_modelo = None
+        for tr in tabela.select("tr"):
             texto = tr.get_text(" ", strip=True)
             if texto.startswith("Modelo:"):
                 fipe_modelo = texto.split("Modelo:", 1)[1].strip()
             elif texto.startswith("Valor:"):
-                fipe_valor = texto.split("Valor:", 1)[1].strip()
+                candidatos.append((fipe_modelo, texto.split("Valor:", 1)[1].strip()))
+                fipe_modelo = None
+
+    fipe_modelo = fipe_valor = None
+    if candidatos:
+        fipe_modelo, fipe_valor = max(candidatos, key=lambda c: _valor_numerico(c[1]))
 
     if fipe_valor:
         modelo = fipe_modelo or modelo_detran or marca
         return modelo, fipe_valor
 
-    if marca or modelo_detran:
-        modelo = " ".join(p for p in (marca, modelo_detran) if p)
-        return modelo, config.NAO_ENCONTRADO
+    modelo_detran_completo = " ".join(p for p in (marca, modelo_detran) if p)
+
+    # Sem valor FIPE: usa o Valor Venal + 10% como valor de referencia.
+    venal = _extrair_valor_venal(soup)
+    if venal is not None:
+        valor = (venal * ACRESCIMO_VALOR_VENAL).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        return modelo_detran_completo or config.NAO_ENCONTRADO, _formatar_moeda(valor)
+
+    if modelo_detran_completo:
+        return modelo_detran_completo, config.NAO_ENCONTRADO
 
     if fipe_nao_encontrada:
         return config.NAO_ENCONTRADO, config.NAO_ENCONTRADO
